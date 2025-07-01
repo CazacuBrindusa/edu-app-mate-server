@@ -18,10 +18,23 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 
 const app = express();
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://edu-app-mate-client.onrender.com'
+];
+
 app.use(cors({
-  origin: 'https://edu-app-mate-client.onrender.com',
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
+
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
@@ -96,7 +109,7 @@ transporter.verify()
 
 // helper to send the reset email
 async function sendResetEmail(email, token) {
-  const resetUrl = `http://localhost:3000/reset-password/${token}`;
+  const resetUrl = `https://edu-app-mate-client.onrender.com/reset-password/${token}`;
   await transporter.sendMail({
     from: process.env.FROM_ADDRESS,
     to: email,
