@@ -19,9 +19,8 @@ const axios = require('axios');
 
 const app = express();
 app.use(cors({
-  origin: 'http://localhost:3000',
-  credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: 'https://edu-app-mate-client.onrender.com',
+  credentials: true
 }));
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
