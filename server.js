@@ -414,9 +414,17 @@ app.post('/api/grades', authMiddleware, async (req, res) => {
 
   // Extract exercises from PDF (for AI homework generation)
   let pdfExercises = [];
+  let buffer;
+try {
+  const response = await axios.get(test.file, { responseType: 'arraybuffer' });
+  buffer = response.data;
+} catch (err) {
+  console.warn('Failed to fetch PDF from Cloudinary:', err.message);
+  buffer = null;
+}
+
+if (buffer) {
   try {
-    const pdfPath = path.join(__dirname, 'uploads', test.file);
-    const buffer = fs.readFileSync(pdfPath);
     const pdfData = await pdfParse(buffer);
     const text = pdfData.text;
 
@@ -429,8 +437,11 @@ app.post('/api/grades', authMiddleware, async (req, res) => {
       return `${question}\n${code}`;
     }).filter(Boolean);
   } catch (err) {
-    console.warn('PDF extraction failed:', err.message);
+    console.warn('PDF parse failed:', err.message);
   }
+} else {
+  console.warn('No PDF buffer available to parse.');
+}
 
   const weakExercises = exercises.filter(
     ex => Number(ex.obtainedPoints) < Number(ex.maxPoints) / 2
@@ -559,16 +570,29 @@ ${aiTex}
     return res.status(500).json({ error: 'Failed to save LaTeX file' });
   }
 
-  try {
-    execSync(`pdflatex -output-directory="${uploadsDir}" "${texPath}"`, { stdio: 'pipe' });
-  } catch (err) {
-    const stderr = err.stderr?.toString() || err.message;
-    console.error('LaTeX compile error:', stderr);
-    return res.status(500).json({ error: 'LaTeX compilation failed', details: stderr });
-  }
+  const cloudinary = require('cloudinary').v2;
 
-  grade.homeworkFile = pdfFile;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+let uploadedPdfUrl;
+try {
+  const result = await cloudinary.uploader.upload(path.join(uploadsDir, pdfFile), {
+    resource_type: 'raw',
+    folder: 'homework',
+    public_id: `hw-${grade._id}`,
+    overwrite: true,
+  });
+  uploadedPdfUrl = result.secure_url;
+  grade.homeworkFile = uploadedPdfUrl;
   await grade.save();
+} catch (err) {
+  console.error('Cloudinary upload failed:', err.message);
+  return res.status(500).json({ error: 'Failed to upload homework PDF' });
+}
 
   const student = await Student.findById(studentId);
   if (student) {
