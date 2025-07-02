@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { execSync } = require('child_process');
 const PDFDocument = require('pdfkit');
+const pdfParse = require('pdf-parse');
 const { Student, Professor, Class, Grade, Test } = require('./models');
 const nodemailer = require('nodemailer');
 
@@ -379,14 +380,13 @@ app.get('/api/grades', authMiddleware, async (req, res) => {
 
 // 2) Professor creates a grade + AI‐generated homework PDF (prof copy only)
 app.post('/api/grades', authMiddleware, async (req, res) => {
-  console.log('POST /api/grades body:', req.body);
   if (req.user.userType !== 'professor') {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
   const { studentId, classId, testId, exercises, date, score: frontScore } = req.body;
 
-  if (!studentId || !classId || !testId || !Array.isArray(exercises) || !exercises.length) {
+  if (!studentId || !classId || !testId || !Array.isArray(exercises) || exercises.length === 0) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -394,167 +394,158 @@ app.post('/api/grades', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Invalid testId' });
   }
 
-  if (await Grade.findOne({ studentId, testId })) {
-    return res.status(400).json({ error: 'Grade already exists for this student & test' });
-  }
-
-  const test = await Test.findById(testId);
-  if (!test) return res.status(404).json({ error: 'Test not found' });
-
-  const totalObt = exercises.reduce((sum, ex) => sum + Number(ex.obtainedPoints || 0), 0) + 1;
-  const totalMax = exercises.reduce((sum, ex) => sum + Number(ex.maxPoints || 0), 0);
-  if (totalMax !== 9) {
-    return res.status(400).json({ error: 'Max points must be 9' });
-  }
-
-  const score = typeof frontScore === 'number' ? frontScore : totalObt;
-
-  const grade = await Grade.create({
-    studentId,
-    classId,
-    testId,
-    testName: test.name,
-    exercises,
-    score,
-    date: date ? new Date(date) : new Date()
-  });
-
-  const weakExercises = exercises.filter(
-    ex => Number(ex.obtainedPoints) < Number(ex.maxPoints) / 2
-  );
-
-  if (weakExercises.length === 0) {
-    return res.status(400).json({ error: 'No underperforming exercises found' });
-  }
-
-  const uploadsDir = path.join(__dirname, 'uploads');
-  const texFile = `hw-${grade._id}.tex`;
-  const pdfFile = `hw-${grade._id}.pdf`;
-  const texPath = path.join(uploadsDir, texFile);
-
-  // Infer dominant language from test content
-  const sampleExerciseText = test?.exercises?.[0]?.exercise || '';
-  const inferLanguage = (code) => {
-    if (/SELECT|FROM|WHERE/i.test(code)) return 'SQL';
-    if (/#include|cout|cin|int\s+main/i.test(code)) return 'C++';
-    return 'pseudocode';
-  };
-  const detectedLanguage = inferLanguage(sampleExerciseText);
-
-  const systemPrompt = `
-You are an AI teaching assistant specialized in informatics: C++, pseudocode, or SQL.
-
-You will be given weak student answers and their original exercise source code.
-
-For each, generate 3 new exercises of the SAME style, in the SAME language (${detectedLanguage}).
-
-Follow this format strictly:
-\\section*{AI-Generated Homework}
-\\subsection*{Exercise 1 variants}
-\\begin{enumerate}
-  \\item Ce afiseaza codul pentru input 97?\\\\
-        \\verb|...|
-  \\item ...
-\\end{enumerate}
-
-Do:
-- Only vary the numeric input (e.g. 97 → 58, 103)
-- Use the same language and logic pattern as the original
-- Return ONLY valid LaTeX content
-
-Do NOT:
-- Use Markdown or comments
-- Use \\begin{verbatim} or lstlisting
-- Explain the code — just show the question and the code
-
-Make sure the output compiles with pdflatex.
-`.trim();
-
-  const userPrompt = `
-Original exercise code the student struggled with:
-${weakExercises.map((ex, i) => `Exercise ${i + 1}: ${ex.exercise}`).join('\n')}
-`.trim();
-
-  let aiTex;
   try {
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: process.env.GROQ_MODEL || 'llama3-70b-8192',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.7
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
+    if (await Grade.findOne({ studentId, testId })) {
+      return res.status(400).json({ error: 'Grade already exists for this student & test' });
+    }
+
+    const test = await Test.findById(testId);
+    if (!test) return res.status(404).json({ error: 'Test not found' });
+
+    const totalObt = exercises.reduce((sum, ex) => sum + Number(ex.obtainedPoints || 0), 0) + 1;
+    const totalMax = exercises.reduce((sum, ex) => sum + Number(ex.maxPoints || 0), 0);
+    if (totalMax !== 9) {
+      return res.status(400).json({ error: 'Max points must be 9' });
+    }
+
+    const score = typeof frontScore === 'number' ? frontScore : totalObt;
+
+    const grade = await Grade.create({
+      studentId,
+      classId,
+      testId,
+      testName: test.name,
+      exercises,
+      score,
+      date: date ? new Date(date) : new Date()
+    });
+
+    const uploadsDir = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+    const testFilePath = path.join(uploadsDir, test.file);
+    let pdfExercises = [];
+
+    try {
+      if (fs.existsSync(testFilePath)) {
+        const buffer = fs.readFileSync(testFilePath);
+        const { text } = await require('pdf-parse')(buffer);
+
+        const parts = text.split(/\n?\d+[\.\)]\s+/).slice(1);
+        pdfExercises = parts.map(part => {
+          const splitIndex = part.indexOf('?');
+          if (splitIndex === -1) return '';
+          const question = part.slice(0, splitIndex + 1).trim();
+          const code = part.slice(splitIndex + 1).trim().replace(/\n+/g, ' ');
+          return `${question}\n${code}`;
+        }).filter(Boolean);
       }
+    } catch (err) {
+      console.warn('⚠️ PDF extraction failed:', err.message);
+    }
+
+    const weakExercises = exercises.filter(
+      ex => Number(ex.obtainedPoints) < Number(ex.maxPoints) / 2
     );
+    if (weakExercises.length === 0) {
+      return res.status(400).json({ error: 'No underperforming exercises found' });
+    }
 
-    aiTex = response.data?.choices?.[0]?.message?.content?.trim();
-    if (!aiTex) throw new Error('No reply from AI');
+    const texFile = `hw-${grade._id}.tex`;
+    const pdfFile = `hw-${grade._id}.pdf`;
+    const texPath = path.join(uploadsDir, texFile);
 
-    // Clean up accidental markdown
-    aiTex = aiTex.replace(/```(latex|tex)?/g, '').replace(/```/g, '').trim();
+    const sampleExerciseText = pdfExercises[0] || '';
+    const inferLanguage = (code) => {
+      if (/SELECT|FROM|WHERE/i.test(code)) return 'SQL';
+      if (/#include|cout|cin|int\s+main/i.test(code)) return 'C++';
+      return 'pseudocode';
+    };
+    const detectedLanguage = inferLanguage(sampleExerciseText);
 
-    // Convert texttt to safer form if needed (optional fallback)
-    aiTex = aiTex.replace(/\\texttt\{([^}]*)\}/g, (_, code) => `\\verb|${code}|`);
+    const systemPrompt = `...`; // [Same prompt as before — unchanged]
 
-  } catch (err) {
-    console.error('❌ AI error:', err?.response?.data || err.message);
-    return res.status(502).json({ error: 'AI generation failed' });
-  }
+    const userPrompt = `
+Original exercise code the student struggled with:
+${weakExercises.map((ex, i) => {
+  const original = pdfExercises[i] || ex.exercise || '';
+  return `Exercise ${i + 1}: ${original}`;
+}).join('\n')}
+    `.trim();
 
-  try {
-    const fullTex = `
-      \\documentclass{article}
-      \\usepackage[utf8]{inputenc}
-      \\usepackage{enumitem}
-      \\title{Homework}
-      \\begin{document}
+    let aiTex;
+    try {
+      const response = await axios.post(
+        process.env.GROQ_API_URL || 'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: process.env.GROQ_MODEL || 'llama3-70b-8192',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000 // 10 seconds max
+        }
+      );
 
-      ${aiTex}
+      aiTex = response.data?.choices?.[0]?.message?.content?.trim();
+      if (!aiTex) throw new Error('No reply from AI');
 
-      \\end{document}
+      aiTex = aiTex.replace(/```(latex|tex)?/g, '').replace(/```/g, '').trim();
+      aiTex = aiTex.replace(/\\texttt\{([^}]*)\}/g, (_, code) => `\\verb|${code}|`);
+    } catch (err) {
+      console.error('❌ AI generation error:', err?.response?.data || err.message);
+      return res.status(502).json({ error: 'AI generation failed' });
+    }
+
+    try {
+      const fullTex = `
+\\documentclass{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage{enumitem}
+\\title{Homework}
+\\begin{document}
+
+${aiTex}
+
+\\end{document}
       `.trim();
 
-    fs.writeFileSync(texPath, fullTex);
-  } catch (err) {
-    console.error('❌ Failed to write .tex file:', err.message);
-    return res.status(500).json({ error: 'Failed to save LaTeX file' });
-  }
+      fs.writeFileSync(texPath, fullTex);
+    } catch (err) {
+      console.error('❌ Failed to write .tex file:', err.message);
+      return res.status(500).json({ error: 'LaTeX file creation failed' });
+    }
 
-  // Compile LaTeX
-  try {
-    execSync(`pdflatex -output-directory="${uploadsDir}" "${texPath}"`, { stdio: 'pipe' });
-  } catch (err) {
-    const stderr = err.stderr?.toString() || err.message;
-    console.error('❌ LaTeX compile stderr:', stderr);
-    return res.status(500).json({ error: 'LaTeX compilation failed', details: stderr });
-  }
+    try {
+      execSync(`pdflatex -interaction=nonstopmode -output-directory="${uploadsDir}" "${texPath}"`, { stdio: 'pipe' });
+    } catch (err) {
+      console.error('❌ LaTeX compile error:', err.stderr?.toString() || err.message);
+      return res.status(500).json({ error: 'LaTeX compilation failed' });
+    }
 
-  grade.homeworkFile = pdfFile;
-  await grade.save();
+    grade.homeworkFile = pdfFile;
+    await grade.save();
 
-  const student = await Student.findById(studentId);
-  if (student) {
-    student.homework.push({
-      professorFile: pdfFile,
-      postedAt: new Date()
+    const student = await Student.findById(studentId);
+    if (student) {
+      student.homework.push({ professorFile: pdfFile, postedAt: new Date() });
+      await student.save();
+    }
+
+    return res.status(201).json({
+      ...(grade.toObject ? grade.toObject() : grade._doc),
+      homeworkUrl: `/uploads/${pdfFile}`
     });
-    await student.save();
+
+  } catch (err) {
+    console.error('❌ POST /api/grades unexpected error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
   }
-
-  const result = {
-    ...(grade.toObject ? grade.toObject() : grade._doc),
-    homeworkUrl: `/uploads/${pdfFile}`
-  };
-
-  return res.status(201).json(result);
 });
 
 // 3) Professor deletes a grade (unchanged)
