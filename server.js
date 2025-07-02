@@ -38,7 +38,7 @@ app.use(cors({
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
-const SECRET_KEY = 'your_secret_key';
+const SECRET_KEY = process.env.JWT_SECRET || 'your_secret_key';
 
 // In-memory reset‐token store (demo only)
 const resetTokens = {};
@@ -674,5 +674,5 @@ app.get('/api/professors', authMiddleware, async (req, res) => {
 
 
 // ------------------------------------------------------ SERVER START ------------------------------------------------------
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
