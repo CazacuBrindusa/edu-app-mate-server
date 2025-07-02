@@ -31,6 +31,7 @@ const StudentSchema = new mongoose.Schema({
   password: String,
   classId: { type: mongoose.Schema.Types.ObjectId, ref: 'Class' },
   homework: [{
+    _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
     professorFile: String,
     studentFile: String,
     postedAt: { type: Date, default: Date.now }
