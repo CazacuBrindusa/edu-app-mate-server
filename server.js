@@ -22,8 +22,12 @@ const app = express();
 
 app.use(cors({
   origin: 'https://edu-app-mate-client.onrender.com',
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+app.options('*', cors());
 
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
